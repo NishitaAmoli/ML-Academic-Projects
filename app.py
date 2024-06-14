@@ -1,7 +1,14 @@
+from collections import Counter
+import plotly.express as px
+import plotly.graph_objs as go
+from stylecloud import stylecloud
 import preprocessor,helper
+import sentiment_analysis
 import streamlit as st
 import matplotlib.pyplot as plt
 import seaborn as sns
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+import pandas as pd
 
 st.sidebar.title("Whatsapp Chat Analyzer")
 
@@ -135,6 +142,165 @@ if uploaded_file is not None:
             fig,ax = plt.subplots()
             ax.pie(emoji_df['FREQUENCY'].head(),labels=emoji_df['EMOJIS'].head(),autopct="%0.2f")
             st.pyplot(fig)
+
+st.sidebar.title("Sentiment Analyzer")
+upload_file = st.sidebar.file_uploader("Choose a file", type="txt",key="file_uploader")
+
+
+if upload_file is not None:
+    # converting data to utf-8 format from byte format
+    bytes_data = upload_file.getvalue()
+    data = bytes_data.decode("utf-8")
+    df = sentiment_analysis.preprocess_whatsapp_chat(data)
+
+    #st.dataframe(df)
+    df['clean_msg'] = df['message'].apply(sentiment_analysis.clean_text)   # cleaning texts for analysis
+
+    # remove stop words
+    with open('stop_hinglish.txt', 'r') as f:
+        stop_words = f.read().splitlines()
+    df['clean_msg'] = df['clean_msg'].apply(
+        lambda x: ' '.join([word for word in x.split() if word not in stop_words]))
+    df.groupby('user').agg({'message': 'count',
+                                  'emoji': lambda x: ' '.join(set(emoji for emojis in x.dropna() for emoji in emojis))
+                                  }).sort_values(by='message', ascending=False)
+    #st.dataframe(df)
+
+    sentiments = SentimentIntensityAnalyzer()      # inbuilt function for sentiment analysis
+
+    df["positive"] = [sentiments.polarity_scores(i)["pos"] for i in df["clean_msg"]]
+    df["negative"] = [sentiments.polarity_scores(i)["neg"] for i in df["clean_msg"]]
+    df["neutral"] = [sentiments.polarity_scores(i)["neu"] for i in df["clean_msg"]]
+
+    st.dataframe(df)
+
+    x = sum(df["positive"])         # calculating sum of +ve, -ve and neutral msg
+    y = sum(df["negative"])
+    z = sum(df["neutral"])
+    # Perform sentiment analysis
+
+    st.title("Polarity of messages:-")
+    st.header(sentiment_analysis.score(x, y, z))    # writing output to screen
+
+
+    stylecloud.gen_stylecloud(' '.join(df['clean_msg']),
+                              icon_name='fab fa-whatsapp',
+                              colors=['#25D366', '#128C7E', '#075E54'],
+                              random_state=13
+                             )
+    st.title("Analysis of most common words")
+    col1, col2 = st.columns(2)
+    with col1:
+        # calculating most common words by filtering user as group_notification, msg as media omitted and stop words
+        f = open('stop_hinglish.txt', 'r')
+        stop_words = f.read()
+        temp = df[df['user'] != 'group_notification']
+        temp = temp[temp['message'] != '<media omitted>\n']
+        words = []
+        for message in temp['message']:
+            for word in message.lower().split():
+                if word not in stop_words:
+                    words.append(word)
+
+        # creating data frame of most common words by applying filters
+        most_common_df = pd.DataFrame(Counter(words).most_common(20))
+        most_common_df.columns = ['MOST COMMON WORD', 'FREQUENCY']
+        st.dataframe(most_common_df)
+    with col2:
+        st.image('stylecloud.png', caption='Chat Cloud',width=500)
+
+    st.title("Emoticons Analysis")
+    col1,col2 = st.columns(2)
+    fig = go.Figure(data=go.Pie(labels=['Chats without emoji', 'Chats with emoji'],
+                                values=
+                                df.assign(is_emoji=df['emoji'].apply(lambda x: True if x != '' else False)).groupby(
+                                    'is_emoji').count()[['message']].reset_index()['message'],
+                                hole=.4, marker=dict(colors=['#25D366', '#075E54', ])))
+    fig.update_traces(hoverinfo='label+value')
+    with col1:
+        st.header("Pie-Chart for emoji analysis")
+        st.plotly_chart(fig,use_container_width=True)
+    with col2:
+        dataframe = pd.DataFrame(Counter([emoji for message in df.emoji for emoji in message]).most_common(),
+                     columns=['emoji', 'count'],
+                     index=range(1, len(Counter([emoji for message in df.emoji for emoji in message]).most_common()) + 1)
+                     )
+        st.header("Emoticons with their count")
+        st.dataframe(dataframe)
+
+    # Detect media messages
+    df['Is_Media'] = df['message'].apply(lambda x: 'Media omitted' in x or '<Media omitted>' in x)
+
+    # Count media messages per sender
+    media_counts = df[df['Is_Media']].groupby('user').size().reset_index(name='Media_Count')
+
+    # Create a boxplot
+    fig = px.box(media_counts,x='user', y='Media_Count', points='all', title='Media Shared by Users')
+
+    st.title("Media Analysis")
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.title("Active hours of users")
+    st.subheader("Most active hours of users each day of whole week")
+    pivot = pd.pivot_table(df, index='hour', columns='day_name', values='message', aggfunc='count').fillna(0)
+    heatmap = go.Heatmap(z=pivot.values,
+                         x=pivot.columns,
+                         y=pivot.index,
+                         hovertemplate='Interventions at %{y}-hour<extra>%{z}</extra>',
+                         colorscale='Greens')
+    f = go.Figure(data=[heatmap]).update_layout(xaxis={'categoryorder': 'array',
+                                                         'categoryarray': ['Monday', 'Tuesday', 'Wednesday',
+                                                                           'Thursday', 'Friday', 'Saturday', 'Sunday']})
+    st.plotly_chart(f,use_container_width=True)
+
+    # Extract date and time for plotting
+    df['only_date'] = df['date'].dt.date
+    df['Hour'] = df['date'].dt.hour
+
+    # Group by sender and hour to count messages
+    message_flow = df.groupby(['user', 'only_date', 'Hour']).size().reset_index(name='Message_Count')
+
+    # Create a line chart
+    fig = px.line(message_flow, x='Hour', y='Message_Count', color='user', line_group='only_date',
+                   markers=True)
+
+    # Update layout for better readability
+    fig.update_layout(xaxis_title='Hour of the Day', yaxis_title='Number of Messages',
+                      xaxis=dict(tickmode='linear', tick0=0, dtick=1))
+    st.title("User Message Responses Flow")
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Extract day of the week (0 = Monday, 6 = Sunday)
+    df['DayOfWeek'] = df['date'].dt.dayofweek
+
+    # Count messages per day of the week
+    message_counts = df.groupby('DayOfWeek').size().reset_index(name='Message_Count')
+
+    # Create a line chart
+    fig = px.line(message_counts, x='DayOfWeek', y='Message_Count')
+
+    # Update x-axis to show weekdays
+    fig.update_layout(
+        xaxis={
+            'tickvals': [0, 1, 2, 3, 4, 5, 6],
+            'ticktext': ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'],
+            'title': 'Day of the Week'
+        },
+        yaxis={'title': 'Number of Messages'}
+    )
+    st.title('User Interventions by Day of the Week')
+    st.plotly_chart(fig, use_container_width=True)
+
+
+
+
+
+
+
+
+
+
+
 
 
 
